@@ -1,0 +1,12 @@
+numpy
+pytorch
+tqdm
+matplotlib
+seaborn
+scipy
+scikit-learn
+xarray
+dask
+netCDF4
+numba
+cartopy
