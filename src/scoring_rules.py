@@ -607,6 +607,51 @@ class ScoringRulesForWeatherBenchPatched(ScoringRule):
         return self.scoring_rule.estimate_score_batch(forecast, verification)
 
 
+class LossForWeatherBenchPatched:
+    """Same as ScoreForWeatherBenchPatched, but with a loss function rather than a SR."""
+
+    def __init__(self, loss, patch_step: int = 8, patch_size: int = 16):
+        """
+        When you call the `estimate_score_batch` method, this method flattens the weatherbench data and computes the
+        scoring rule on the flattened data.
+
+        :param loss: a loss function.
+        """
+        self.loss = loss
+        self.patch_step = patch_step
+        self.patch_size = patch_size
+
+    def __call__(self, forecast: TensorType["batch_size", "height", "width", "fields"],
+                 verification: TensorType["batch_size", "height", "width", "fields"]) -> TensorType[float]:
+        """
+        """
+        forecast = self.transform_tensor(forecast)
+        verification = self.transform_tensor(verification)
+
+        return self.loss(forecast, verification)
+
+    def transform_tensor(self, tensor):
+        # you first need to add the periodic boundary conditions, using padding:
+        padding = (0, self.patch_step, 0, self.patch_step)
+        tensor = tensor.permute(0, 3, 1, 2)
+        tensor = F.pad(tensor, pad=padding,
+                       mode='circular')  # as we have a 4d tensor, it expects a 2d padding size
+        tensor = tensor.permute(0, 2, 3, 1)
+
+        # Tensor.unfold replaces the unfolded dimension with the number of windows, and adds a last dimension with the
+        # content of each window
+        # dimension, size, step
+        tensor = tensor.unfold(1, self.patch_size, self.patch_step)
+
+        tensor = tensor.unfold(2, self.patch_size, self.patch_step)
+        #  tensor: batch x num_windows_height x num_windows_width x fields x patch_size x patch_size
+
+        #          tensor: TensorType["batch", "data_size"]
+        # the original batch, num_windows_height and num_windows_width make the new batch size;
+        # fields x patch_size x patch_size make the new data_size
+        return tensor.flatten(0, 2).flatten(1, -1)
+
+
 def estimate_score_chunks(scoring_rule: ScoringRule, forecast: TensorType["batch", "ensemble_size", "data_size"],
                           verification: TensorType["batch", "data_size"], chunk_size=100) -> TensorType[float]:
     batch_size = verification.shape[0]

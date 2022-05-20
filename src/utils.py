@@ -58,7 +58,7 @@ def estimate_bandwidth_timeseries(timeseries: TensorType["batch", "data_size"], 
     """Estimate the bandwidth for the gaussian kernel in KernelSR. """
 
     timesteps, data_size = timeseries.shape
-    distances = torch.cdist(timeseries.reshape(timesteps, data_size), timeseries.reshape(timesteps, data_size))
+    distances = torch.cdist(timeseries, timeseries)
     # discard the diagonal elements, as they are 0:
     distances = distances[~torch.eye(timesteps, dtype=bool)].flatten()
 
@@ -240,7 +240,7 @@ def lorenz96_mask(data_size=8, patch_size=4) -> TensorType["n_patches", "data_si
 
 
 def lorenz_mask(data_size=1) -> TensorType["n_patches", "data_size", bool]:
-    # for the case data_size=8, we define 4 patches: 0-3, 2-5, 4-7, 6-1
+    # This is basically a dummy mask
     if data_size != 1:
         raise NotImplementedError  # for now
 

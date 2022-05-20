@@ -15,7 +15,7 @@ install_import_hook('src.weatherbench_utils')
 install_import_hook('src.unet_utils')
 
 from src.nn import ConditionalGenerativeModel, createGenerativeFCNN, InputTargetDataset, \
-    UNet2D, DiscardWindowSizeDim, get_predictions_and_target
+    UNet2D, DiscardWindowSizeDim, get_predictions_and_target, createGenerativeGRUNN
 from src.utils import load_net, def_loader_kwargs
 from src.parsers import parser_predict, nonlinearities_dict, setup, default_model_folder, default_root_folder
 from src.weatherbench_utils import load_weatherbench_data
@@ -56,6 +56,8 @@ plot_end_timestep = args.plot_end_timestep
 gamma = args.gamma_kernel_score
 gamma_patched = args.gamma_kernel_score_patched
 patch_size = args.patch_size
+no_RNN = args.no_RNN
+hidden_size_rnn = args.hidden_size_rnn
 
 save_pdf = True
 plot_start_timestep = 0
@@ -69,18 +71,21 @@ if model == "lorenz":
     scoring_rule1 = "Energy"
     lr1 = 0.01
     lr_c1 = None
+    hidden_size_rnn_1 = 8
     critic_steps_every_generator_step1 = 1
 
     method2 = "GAN"
     scoring_rule2 = None
-    lr2 = 0.03
+    lr2 = 0.0001
     lr_c2 = 0.001
+    hidden_size_rnn_2 = 8
     critic_steps_every_generator_step2 = 1
 
     method3 = "WGAN_GP"
     scoring_rule3 = None
-    lr3 = 0.0001
-    lr_c3 = 0.1
+    lr3 = 0.0003
+    lr_c3 = 0.03
+    hidden_size_rnn_3 = 8
     critic_steps_every_generator_step3 = 5
 
     methods_list = ["Energy", "GAN", "WGAN-GP"]
@@ -91,42 +96,45 @@ elif model == "lorenz96":
     scoring_rule1 = "EnergyKernel"
     lr1 = 0.001
     lr_c1 = None
+    hidden_size_rnn_1 = 32
     critic_steps_every_generator_step1 = 1
 
     method2 = "GAN"
     scoring_rule2 = None
-    lr2 = 0.01
+    lr2 = 0.0001
     lr_c2 = 0.001
+    hidden_size_rnn_2 = 64
     critic_steps_every_generator_step2 = 1
 
     method3 = "WGAN_GP"
     scoring_rule3 = None
     lr3 = 0.0001
-    lr_c3 = 0.003
+    lr_c3 = 0.01
+    hidden_size_rnn_3 = 64
     critic_steps_every_generator_step3 = 5
 
     methods_list = ["Energy-Kernel", "GAN", "WGAN-GP"]
 else:
     raise NotImplementedError
 
-datasets_folder, nets_folder1, data_size, auxiliary_var_size, name_postfix1, unet_depths, patch_size, method_is_gan1 = \
-    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method1, scoring_rule1, kernel, patched,
-          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step1, base_measure, lr1,
-          lr_c1, batch_size, no_early_stop, unet_noise_method, unet_large)
-
-datasets_folder, nets_folder2, data_size, auxiliary_var_size, name_postfix2, unet_depths, patch_size, method_is_gan2 = \
-    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method2, scoring_rule2, kernel, patched,
-          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step2, base_measure, lr2,
-          lr_c2, batch_size, no_early_stop, unet_noise_method, unet_large)
-
-datasets_folder, nets_folder3, data_size, auxiliary_var_size, name_postfix3, unet_depths, patch_size, method_is_gan3 = \
-    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method3, scoring_rule3, kernel, patched,
-          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step3, base_measure, lr3,
-          lr_c3, batch_size, no_early_stop, unet_noise_method, unet_large)
-
 model_is_weatherbench = model == "WeatherBench"
 
-nn_model = "unet" if model_is_weatherbench else "fcnn"
+nn_model = "unet" if model_is_weatherbench else ("fcnn" if no_RNN else "rnn")
+
+datasets_folder, nets_folder1, data_size, auxiliary_var_size, name_postfix1, unet_depths, patch_size, method_is_gan1, hidden_size_rnn_1 = \
+    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method1, scoring_rule1, kernel, patched,
+          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step1, base_measure, lr1,
+          lr_c1, batch_size, no_early_stop, unet_noise_method, unet_large, nn_model, hidden_size_rnn_1)
+
+datasets_folder, nets_folder2, data_size, auxiliary_var_size, name_postfix2, unet_depths, patch_size, method_is_gan2, hidden_size_rnn_2 = \
+    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method2, scoring_rule2, kernel, patched,
+          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step2, base_measure, lr2,
+          lr_c2, batch_size, no_early_stop, unet_noise_method, unet_large, nn_model, hidden_size_rnn_2)
+
+datasets_folder, nets_folder3, data_size, auxiliary_var_size, name_postfix3, unet_depths, patch_size, method_is_gan3, hidden_size_rnn_3 = \
+    setup(model, root_folder, model_folder, args.datasets_folder, data_size, method3, scoring_rule3, kernel, patched,
+          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step3, base_measure, lr3,
+          lr_c3, batch_size, no_early_stop, unet_noise_method, unet_large, nn_model, hidden_size_rnn_3)
 
 # --- data handling ---
 if not model_is_weatherbench:
@@ -161,6 +169,7 @@ data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_si
 nets_list = []
 nets_folder_list = [nets_folder1, nets_folder2, nets_folder3]
 name_postfix_list = [name_postfix1, name_postfix2, name_postfix3]
+gru_hidden_size_list = [hidden_size_rnn_1, hidden_size_rnn_2, hidden_size_rnn_3]
 for i in range(3):
     wrap_net = True
     # create generative net:
@@ -171,6 +180,13 @@ for i in range(3):
                              int(input_size * 0.75 + output_size * 3), int(output_size * 5)]
         inner_net = createGenerativeFCNN(input_size=input_size, output_size=output_size, hidden_sizes=hidden_sizes_list,
                                          nonlinearity=nonlinearities_dict[nonlinearity])()
+    elif nn_model == "rnn":
+        output_size = data_size
+        gru_layers = 1
+        inner_net = createGenerativeGRUNN(data_size=data_size, gru_hidden_size=gru_hidden_size_list[i],
+                                          noise_size=auxiliary_var_size,
+                                          output_size=output_size, hidden_sizes=None, gru_layers=gru_layers,
+                                          nonlinearity=nonlinearities_dict[nonlinearity])()
     elif nn_model == "unet":
         # select the noise method here:
         inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
@@ -241,7 +257,7 @@ with torch.no_grad():
         var_name = r"$x_{}$".format(1)
 
     # predictions: median and 99% quantile region
-    fig, ax = plt.subplots(nrows=data_size, ncols=1, sharex="col", figsize=(6, 4.5) if data_size == 1 else None)
+    fig, ax = plt.subplots(nrows=data_size, ncols=1, sharex="col", figsize=(8, 3.5) if data_size == 1 else None)
     label_size = 13
 
     # add the target values:
@@ -276,7 +292,7 @@ with torch.no_grad():
             root_folder = default_root_folder
         if model_folder is None:
             model_folder = root_folder + '/' + default_model_folder[model]
-        bbox = Bbox(np.array([[0, 0], [5.8, 4]]))
+        bbox = Bbox(np.array([[0.3, -0.1], [7.3, 3.2]]))
         plt.savefig(model_folder + "prediction_median_comparison." + ("pdf" if save_pdf else "png"), dpi=400,
                     bbox_inches=bbox)
     plt.close()

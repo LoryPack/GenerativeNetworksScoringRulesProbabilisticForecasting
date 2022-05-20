@@ -15,7 +15,8 @@ install_import_hook('src.weatherbench_utils')
 install_import_hook('src.unet_utils')
 
 from src.nn import ConditionalGenerativeModel, createGenerativeFCNN, InputTargetDataset, \
-    UNet2D, DiscardWindowSizeDim, get_predictions_and_target
+    UNet2D, DiscardWindowSizeDim, get_predictions_and_target, createGenerativeGRUNN, DiscardNumberGenerationsInOutput, \
+    createGRUNN, createFCNN
 from src.scoring_rules import EnergyScore, KernelScore, VariogramScore, PatchedScoringRule, estimate_score_chunks
 from src.utils import load_net, estimate_bandwidth_timeseries, lorenz96_variogram, def_loader_kwargs, \
     weatherbench_variogram_haversine
@@ -59,19 +60,21 @@ plot_end_timestep = args.plot_end_timestep
 gamma = args.gamma_kernel_score
 gamma_patched = args.gamma_kernel_score_patched
 patch_size = args.patch_size
+no_RNN = args.no_RNN
+hidden_size_rnn = args.hidden_size_rnn
 
 save_pdf = True
 
 compute_patched = model in ["lorenz96", ]
 
-datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan = \
-    setup(model, root_folder, model_folder, datasets_folder, data_size, method, scoring_rule, kernel, patched,
-          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step, base_measure, lr,
-          lr_c, batch_size, no_early_stop, unet_noise_method, unet_large)
-
 model_is_weatherbench = model == "WeatherBench"
 
-nn_model = "unet" if model_is_weatherbench else "fcnn"
+nn_model = "unet" if model_is_weatherbench else ("fcnn" if no_RNN else "rnn")
+
+datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan, hidden_size_rnn = \
+    setup(model, root_folder, model_folder, datasets_folder, data_size, method, scoring_rule, kernel, patched,
+          patch_size, training_ensemble_size, auxiliary_var_size, critic_steps_every_generator_step, base_measure, lr,
+          lr_c, batch_size, args.no_early_stop, unet_noise_method, unet_large, nn_model, hidden_size_rnn)
 
 model_name_for_plot = {"lorenz": "Lorenz63",
                        "lorenz96": "Lorenz96",
@@ -112,36 +115,65 @@ data_loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=batch_size
 data_loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=False, **loader_kwargs)
 
 # --- networks ---
-wrap_net = True
-# create generative net:
-if nn_model == "fcnn":
-    input_size = window_size * data_size + auxiliary_var_size
-    output_size = data_size
-    hidden_sizes_list = [int(input_size * 1.5), int(input_size * 3), int(input_size * 3),
-                         int(input_size * 0.75 + output_size * 3), int(output_size * 5)]
-    inner_net = createGenerativeFCNN(input_size=input_size, output_size=output_size, hidden_sizes=hidden_sizes_list,
-                                     nonlinearity=nonlinearities_dict[nonlinearity])()
-elif nn_model == "unet":
-    # select the noise method here:
-    inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
-                       number_generations_per_forward_call=prediction_ensemble_size, conv_depths=unet_depths)
-    if unet_noise_method in ["sum", "concat"]:
-        # here we overwrite the auxiliary_var_size above, as there is a precise constraint
-        downsampling_factor, n_channels = inner_net.calculate_downsampling_factor()
-        if weatherbench_small:
-            auxiliary_var_size = torch.Size(
-                [n_channels, 16 // downsampling_factor, 16 // downsampling_factor])
-        else:
-            auxiliary_var_size = torch.Size(
-                [n_channels, data_size[1] // downsampling_factor, data_size[2] // downsampling_factor])
-    elif unet_noise_method == "dropout":
-        wrap_net = False  # do not wrap in the conditional generative model
-if wrap_net:
-    net = load_net(nets_folder + f"net{name_postfix}.pth", ConditionalGenerativeModel, inner_net,
-                   size_auxiliary_variable=auxiliary_var_size, base_measure=base_measure,
-                   number_generations_per_forward_call=prediction_ensemble_size, seed=seed + 1)
+if method == "regression":
+    if nn_model == "unet":
+        # NOTE: make sure that a channels dimension exists
+        net_class = UNet2D
+        unet_kwargs = {"in_channels": data_size[0], "out_channels": 1,
+                       "noise_method": "no noise", "conv_depths": unet_depths}
+        net = DiscardWindowSizeDim(net_class(**unet_kwargs))
+    elif nn_model == "rnn":
+        output_size = data_size
+        gru_layers = 1
+        gru_hidden_size = hidden_size_rnn
+        net = createGRUNN(data_size=data_size, gru_hidden_size=gru_hidden_size,
+                          output_size=output_size, hidden_sizes=None, gru_layers=gru_layers,
+                          nonlinearity=nonlinearities_dict[nonlinearity])()
+    else:
+        net = createFCNN(input_size=window_size * data_size, output_size=data_size, unsqueeze_output=True)()
+
+    net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardNumberGenerationsInOutput, net).net
+    # wrap by this to discard the window size dimension and the number of simulations in the output
+    # net = DiscardNumberGenerationsInOutput(DiscardWindowSizeDim(net))
 else:
-    net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardWindowSizeDim, inner_net)
+    wrap_net = True
+    # create generative net:
+    if nn_model == "fcnn":
+        input_size = window_size * data_size + auxiliary_var_size
+        output_size = data_size
+        hidden_sizes_list = [int(input_size * 1.5), int(input_size * 3), int(input_size * 3),
+                             int(input_size * 0.75 + output_size * 3), int(output_size * 5)]
+        inner_net = createGenerativeFCNN(input_size=input_size, output_size=output_size, hidden_sizes=hidden_sizes_list,
+                                         nonlinearity=nonlinearities_dict[nonlinearity])()
+    elif nn_model == "rnn":
+        output_size = data_size
+        gru_layers = 1
+        gru_hidden_size = hidden_size_rnn
+        inner_net = createGenerativeGRUNN(data_size=data_size, gru_hidden_size=gru_hidden_size,
+                                          noise_size=auxiliary_var_size,
+                                          output_size=output_size, hidden_sizes=None, gru_layers=gru_layers,
+                                          nonlinearity=nonlinearities_dict[nonlinearity])()
+    elif nn_model == "unet":
+        # select the noise method here:
+        inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
+                           number_generations_per_forward_call=prediction_ensemble_size, conv_depths=unet_depths)
+        if unet_noise_method in ["sum", "concat"]:
+            # here we overwrite the auxiliary_var_size above, as there is a precise constraint
+            downsampling_factor, n_channels = inner_net.calculate_downsampling_factor()
+            if weatherbench_small:
+                auxiliary_var_size = torch.Size(
+                    [n_channels, 16 // downsampling_factor, 16 // downsampling_factor])
+            else:
+                auxiliary_var_size = torch.Size(
+                    [n_channels, data_size[1] // downsampling_factor, data_size[2] // downsampling_factor])
+        elif unet_noise_method == "dropout":
+            wrap_net = False  # do not wrap in the conditional generative model
+    if wrap_net:
+        net = load_net(nets_folder + f"net{name_postfix}.pth", ConditionalGenerativeModel, inner_net,
+                       size_auxiliary_variable=auxiliary_var_size, base_measure=base_measure,
+                       number_generations_per_forward_call=prediction_ensemble_size, seed=seed + 1)
+    else:
+        net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardWindowSizeDim, inner_net)
 
 if cuda:
     net.cuda()
@@ -163,70 +195,73 @@ with torch.no_grad():
         predictions_val = net(input_data_val)  # shape (n_val, ensemble_size, data_size)
         predictions_test = net(input_data_test)  # shape (n_test, ensemble_size, data_size)
 
-# --- scoring rules ---
-if compute_patched:
-    # mask for patched SRs:
-    masks = define_masks[model](data_size=data_size)
+if method != "regression":
+    # --- scoring rules ---
+    if compute_patched:
+        # mask for patched SRs:
+        masks = define_masks[model](data_size=data_size)
 
-if gamma is None:
-    print("Compute gamma...")
-    gamma = estimate_bandwidth_timeseries(target_data_val, return_values=["median"])
-    print(f"Estimated gamma: {gamma:.4f}")
-if gamma_patched is None and compute_patched:
-    # determine the gamma using the first patch only. This assumes that the values of the variables
-    # are roughly the same in the different patches.
-    gamma_patched = estimate_bandwidth_timeseries(target_data_val[:, masks[0]], return_values=["median"])
-    print(f"Estimated gamma patched: {gamma_patched:.4f}")
+    if gamma is None:
+        print("Compute gamma...")
+        gamma = estimate_bandwidth_timeseries(target_data_val, return_values=["median"])
+        print(f"Estimated gamma: {gamma:.4f}")
+    if gamma_patched is None and compute_patched:
+        # determine the gamma using the first patch only. This assumes that the values of the variables
+        # are roughly the same in the different patches.
+        gamma_patched = estimate_bandwidth_timeseries(target_data_val[:, masks[0]], return_values=["median"])
+        print(f"Estimated gamma patched: {gamma_patched:.4f}")
 
-# instantiate SRs; each SR takes as input: (net_output, target)
-kernel_gaussian_sr = KernelScore(sigma=gamma)
-kernel_rat_quad_sr = KernelScore(kernel="rational_quadratic", alpha=gamma ** 2)
-energy_sr = EnergyScore()
+    # instantiate SRs; each SR takes as input: (net_output, target)
+    kernel_gaussian_sr = KernelScore(sigma=gamma)
+    kernel_rat_quad_sr = KernelScore(kernel="rational_quadratic", alpha=gamma ** 2)
+    energy_sr = EnergyScore()
 
-variogram = None
-if model in ["lorenz96", ]:
-    variogram = lorenz96_variogram(data_size)
-elif model == "WeatherBench":
-    # variogram = weatherbench_variogram(weatherbench_small=weatherbench_small)
-    variogram = weatherbench_variogram_haversine(weatherbench_small=weatherbench_small)
-if variogram is not None and cuda:
-    variogram = variogram.cuda()
+    variogram = None
+    if model in ["lorenz96", ]:
+        variogram = lorenz96_variogram(data_size)
+    elif model == "WeatherBench":
+        # variogram = weatherbench_variogram(weatherbench_small=weatherbench_small)
+        variogram = weatherbench_variogram_haversine(weatherbench_small=weatherbench_small)
+    if variogram is not None and cuda:
+        variogram = variogram.cuda()
 
-variogram_sr = VariogramScore(variogram=variogram)
+    variogram_sr = VariogramScore(variogram=variogram)
 
-if compute_patched:
-    # patched SRs:
-    kernel_gaussian_sr_patched = PatchedScoringRule(KernelScore(sigma=gamma_patched), masks)
-    kernel_rat_quad_sr_patched = PatchedScoringRule(KernelScore(kernel="rational_quadratic", alpha=gamma_patched ** 2),
-                                                    masks)
-    energy_sr_patched = PatchedScoringRule(energy_sr, masks)
+    if compute_patched:
+        # patched SRs:
+        kernel_gaussian_sr_patched = PatchedScoringRule(KernelScore(sigma=gamma_patched), masks)
+        kernel_rat_quad_sr_patched = PatchedScoringRule(
+            KernelScore(kernel="rational_quadratic", alpha=gamma_patched ** 2),
+            masks)
+        energy_sr_patched = PatchedScoringRule(energy_sr, masks)
 
-# -- out of sample score --
+    # -- out of sample score --
+    with torch.no_grad():
+        string = ""
+        for name, predictions, target in zip(["VALIDATION", "TEST"], [predictions_val, predictions_test],
+                                             [target_data_val, target_data_test]):
+            string += name + "\n"
+            kernel_gaussian_score = estimate_score_chunks(kernel_gaussian_sr, predictions, target)
+            kernel_rat_quad_score = estimate_score_chunks(kernel_rat_quad_sr, predictions, target)
+            energy_score = estimate_score_chunks(energy_sr, predictions, target)
+            variogram_score = estimate_score_chunks(variogram_sr, predictions, target, chunk_size=8)
+
+            string += f"Whole data scores: \nEnergy score: {energy_score:.2f}, " \
+                      f"Gaussian Kernel score {kernel_gaussian_score:.2f}," \
+                      f" Rational quadratic Kernel score {kernel_rat_quad_score:.2f}, " \
+                      f"Variogram score {variogram_score:.2f}\n"
+
+            if compute_patched:
+                kernel_gaussian_score_patched = estimate_score_chunks(kernel_gaussian_sr_patched, predictions, target)
+                kernel_rat_quad_score_patched = estimate_score_chunks(kernel_rat_quad_sr_patched, predictions, target)
+                energy_score_patched = estimate_score_chunks(energy_sr_patched, predictions, target)
+                string += f"\nPatched data scores: \nEnergy score: {energy_score_patched:.2f}, " \
+                          f"Gaussian Kernel score {kernel_gaussian_score_patched:.2f}," \
+                          f" Rational quadratic Kernel score {kernel_rat_quad_score_patched:.2f}\n"
+
+        print(string)
+
 with torch.no_grad():
-    string = ""
-    for name, predictions, target in zip(["VALIDATION", "TEST"], [predictions_val, predictions_test],
-                                         [target_data_val, target_data_test]):
-        string += name + "\n"
-        kernel_gaussian_score = estimate_score_chunks(kernel_gaussian_sr, predictions, target)
-        kernel_rat_quad_score = estimate_score_chunks(kernel_rat_quad_sr, predictions, target)
-        energy_score = estimate_score_chunks(energy_sr, predictions, target)
-        variogram_score = estimate_score_chunks(variogram_sr, predictions, target, chunk_size=8)
-
-        string += f"Whole data scores: \nEnergy score: {energy_score:.2f}, " \
-                  f"Gaussian Kernel score {kernel_gaussian_score:.2f}," \
-                  f" Rational quadratic Kernel score {kernel_rat_quad_score:.2f}, " \
-                  f"Variogram score {variogram_score:.2f}\n"
-
-        if compute_patched:
-            kernel_gaussian_score_patched = estimate_score_chunks(kernel_gaussian_sr_patched, predictions, target)
-            kernel_rat_quad_score_patched = estimate_score_chunks(kernel_rat_quad_sr_patched, predictions, target)
-            energy_score_patched = estimate_score_chunks(energy_sr_patched, predictions, target)
-            string += f"\nPatched data scores: \nEnergy score: {energy_score_patched:.2f}, " \
-                      f"Gaussian Kernel score {kernel_gaussian_score_patched:.2f}," \
-                      f" Rational quadratic Kernel score {kernel_rat_quad_score_patched:.2f}\n"
-
-    print(string)
-
     # -- calibration metrics --
     # target_data_test shape (n_test, data_size)
     # predictions_test shape (n_test, ensemble_size, data_size)
@@ -249,6 +284,7 @@ with torch.no_grad():
     print(string2)
 
     # -- plots --
+with torch.no_grad():
     if model_is_weatherbench:
         # we visualize only the first 8 variables.
         variable_list = np.linspace(0, target_data_test.shape[-1] - 1, 8, dtype=int)
@@ -271,44 +307,42 @@ with torch.no_grad():
         var_names = [r"$x_{}$".format(i + 1) for i in range(data_size)]
 
     # predictions: mean +- std
-    predictions_mean = torch.mean(predictions_test_for_plot, dim=1).detach().numpy()
-    predictions_std = torch.std(predictions_test_for_plot, dim=1).detach().numpy()
-
-    fig, ax = plt.subplots(nrows=data_size, ncols=1, sharex="col", figsize=(6.4, 3) if data_size == 1 else None)
     label_size = 13
-    if data_size == 1:
-        ax = [ax]
-    for var in range(data_size):
-        ax[var].plot(time_vec[plot_start_timestep:plot_end_timestep],
-                     target_data_test_for_plot[plot_start_timestep:plot_end_timestep, var], ls="--", color=f"C{var}")
-        ax[var].plot(time_vec[plot_start_timestep:plot_end_timestep],
-                     predictions_mean[plot_start_timestep:plot_end_timestep, var], ls="-", color=f"C{var}")
-        ax[var].fill_between(
-            time_vec[plot_start_timestep:plot_end_timestep], alpha=0.3, color=f"C{var}",
-            y1=predictions_mean[plot_start_timestep:plot_end_timestep, var] -
-               predictions_std[plot_start_timestep:plot_end_timestep, var],
-            y2=predictions_mean[plot_start_timestep:plot_end_timestep, var] +
-               predictions_std[plot_start_timestep:plot_end_timestep, var])
-        ax[var].set_ylabel(var_names[var], size=label_size)
+    if method != "regression":
+        predictions_mean = torch.mean(predictions_test_for_plot, dim=1).detach().numpy()
+        predictions_std = torch.std(predictions_test_for_plot, dim=1).detach().numpy()
 
-    ax[-1].set_xlabel("Integration time index")
-    fig.suptitle(r"Mean $\pm$ std, " + model)
-    # plt.show()
-    if save_plots:
-        plt.savefig(nets_folder + f"prediction{name_postfix}.png")
-        # save the metrics in file
-        text_file = open(nets_folder + f"test_losses{name_postfix}.txt", "w")
-        text_file.write(string + "\n")
-        text_file.write(string2 + "\n")
-        text_file.close()
-    plt.close()
+        fig, ax = plt.subplots(nrows=data_size, ncols=1, sharex="col", figsize=(6.4, 3) if data_size == 1 else None)
+        if data_size == 1:
+            ax = [ax]
+        for var in range(data_size):
+            ax[var].plot(time_vec[plot_start_timestep:plot_end_timestep],
+                         target_data_test_for_plot[plot_start_timestep:plot_end_timestep, var], ls="--",
+                         color=f"C{var}")
+            ax[var].plot(time_vec[plot_start_timestep:plot_end_timestep],
+                         predictions_mean[plot_start_timestep:plot_end_timestep, var], ls="-", color=f"C{var}")
+            ax[var].fill_between(
+                time_vec[plot_start_timestep:plot_end_timestep], alpha=0.3, color=f"C{var}",
+                y1=predictions_mean[plot_start_timestep:plot_end_timestep, var] -
+                   predictions_std[plot_start_timestep:plot_end_timestep, var],
+                y2=predictions_mean[plot_start_timestep:plot_end_timestep, var] +
+                   predictions_std[plot_start_timestep:plot_end_timestep, var])
+            ax[var].set_ylabel(var_names[var], size=label_size)
+
+        ax[-1].set_xlabel("Integration time index")
+        fig.suptitle(r"Mean $\pm$ std, " + model)
+        # plt.show()
+        if save_plots:
+            plt.savefig(nets_folder + f"prediction{name_postfix}.png")
+        plt.close()
 
     # predictions: median and 99% quantile region
     np_predictions = predictions_test_for_plot.detach().numpy()
     size = 99
     predictions_median = np.median(np_predictions, axis=1)
-    predictions_lower = np.percentile(np_predictions, 50 - size / 2, axis=1)
-    predictions_upper = np.percentile(np_predictions, 50 + size / 2, axis=1)
+    if method != "regression":
+        predictions_lower = np.percentile(np_predictions, 50 - size / 2, axis=1)
+        predictions_upper = np.percentile(np_predictions, 50 + size / 2, axis=1)
 
     fig, ax = plt.subplots(nrows=data_size, ncols=1, sharex="col", figsize=(6.4, 3) if data_size == 1 else None)
     if data_size == 1:
@@ -319,11 +353,12 @@ with torch.no_grad():
                      label="True")
         ax[var].plot(time_vec[plot_start_timestep:plot_end_timestep],
                      predictions_median[plot_start_timestep:plot_end_timestep, var], ls="-", color=f"C{var}",
-                     label="Median forecast")
-        ax[var].fill_between(
-            time_vec[plot_start_timestep:plot_end_timestep], alpha=0.3, color=f"C{var}",
-            y1=predictions_lower[plot_start_timestep:plot_end_timestep, var],
-            y2=predictions_upper[plot_start_timestep:plot_end_timestep, var], label="99% credible region")
+                     label="Median forecast" if method != "regression" else "Forecast")
+        if method != "regression":
+            ax[var].fill_between(
+                time_vec[plot_start_timestep:plot_end_timestep], alpha=0.3, color=f"C{var}",
+                y1=predictions_lower[plot_start_timestep:plot_end_timestep, var],
+                y2=predictions_upper[plot_start_timestep:plot_end_timestep, var], label="99% credible region")
         ax[var].set_ylabel(var_names[var], size=label_size)
         ax[var].tick_params(axis='both', which='major', labelsize=label_size)
 
@@ -335,6 +370,13 @@ with torch.no_grad():
     # plt.show()
 
     if save_plots:
+        # save the metrics in file
+        text_file = open(nets_folder + f"test_losses{name_postfix}.txt", "w")
+        text_file.write(string + "\n")
+        text_file.write(string2 + "\n")
+        text_file.close()
+        # save the plot:
+
         if data_size == 1:
             bbox = Bbox(np.array([[0, -0.2], [6.1, 3]]))
         else:
@@ -342,14 +384,6 @@ with torch.no_grad():
         plt.savefig(nets_folder + f"prediction_median{name_postfix}." + ("pdf" if save_pdf else "png"), dpi=400,
                     bbox_inches=bbox)
     plt.close()
-
-    # now create the SBC plot:
-    if data_size == 1:
-        label_size = 30
-        figsize = (15, 5)
-    else:
-        label_size = 30
-        figsize = (20, 6.6)
 
     if not model_is_weatherbench:
         # metrics plots

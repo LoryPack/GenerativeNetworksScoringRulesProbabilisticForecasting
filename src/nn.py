@@ -21,7 +21,7 @@ patch_typeguard()  # use before @typechecked
 
 def createFCNN(input_size, output_size, hidden_sizes=None, nonlinearity=None, nonlinearity_last_layer=False,
                batch_norm=False, batch_norm_last_layer=False, affine_batch_norm=True,
-               batch_norm_last_layer_momentum=0.1, add_input_at_the_end=False):
+               batch_norm_last_layer_momentum=0.1, add_input_at_the_end=False, unsqueeze_output=False):
     """Function returning a fully connected neural network class with a given input and output size, and optionally
     given hidden layer sizes (if these are not given, they are determined from the input and output size with some
     expression.
@@ -75,8 +75,12 @@ def createFCNN(input_size, output_size, hidden_sizes=None, nonlinearity=None, no
 
             self.nonlinearity_fcn = F.relu if nonlinearity is None else nonlinearity
 
-        def forward(self, x: TensorType["batch_size": ..., "data_size"]) -> TensorType["batch_size": ...,
-                                                                            "output_size"]:
+        def forward(self, x: Union[
+            TensorType["batch_size", "data_size"], TensorType["batch_size", "window_size", "data_size"]]) -> \
+                Union[TensorType["batch_size", "output_size"], TensorType["batch_size", 1, "output_size"]]:
+
+            if x.ndim == 3:
+                x = x.reshape(x.shape[0], -1)
 
             if add_input_at_the_end:
                 x_0 = x.clone().detach()  # this may not be super efficient, but for now it is fine
@@ -103,6 +107,9 @@ def createFCNN(input_size, output_size, hidden_sizes=None, nonlinearity=None, no
                 x = self.bn_out(x)
             if nonlinearity_last_layer:
                 x = self.nonlinearity_fcn(x)
+
+            if unsqueeze_output:
+                x = x.unsqueeze(1)
             return x
 
     return FCNN
@@ -230,10 +237,10 @@ def createCriticFCNN(input_size, hidden_sizes=None, nonlinearity=None, end_sigmo
             self.nonlinearity_fcn = F.relu if nonlinearity is None else nonlinearity
 
         def forward(self, y: TensorType["batch_size", "data_size"],
-                    context: TensorType["batch_size", "window_size", "data_size"]) -> TensorType["batch_size", 1]:
+                    context: TensorType["batch_size", "window_size", "context_size"]) -> TensorType["batch_size", 1]:
             # this network just flattens the context and concatenates it to the realization y (which is either predicted
             # by the generator or real), and then uses a FCNN.
-            # input size of the FCNN must be equal to (window_size + 1) * data_size
+            # input size of the FCNN must be equal to window_size * context_size + data_size
 
             # can add argument `output_size=batch_size * number_generations` with torch 1.10
             input_tensor = torch.cat((y, context.flatten(start_dim=1)), dim=-1)
@@ -254,6 +261,138 @@ def createCriticFCNN(input_size, hidden_sizes=None, nonlinearity=None, end_sigmo
             return result
 
     return CriticFCNN
+
+
+def createGRUNN(data_size, gru_hidden_size, output_size, hidden_sizes=None, gru_layers=3, nonlinearity=None):
+    """Function returning a recurrent neural network with a given input and output size, and optionally
+    given hidden layer sizes (if these are not given, they are determined from the input and output size with some
+    expression. The NN is a single input: the context x.
+
+    In order to instantiate the network, you need to write: createGRUNN(input_size, output_size)() as the function
+    returns a class, and () is needed to instantiate an object.
+
+    Note that the nonlinearity here is as an object or a functional, not a class, eg:
+        nonlinearity =  nn.Softplus()
+    or:
+        nonlinearity =  nn.functional.softplus
+    """
+
+    class GRUNN(nn.Module):
+        """Neural network class with sizes determined by the upper level variables."""
+
+        def __init__(self):
+            super(GRUNN, self).__init__()
+
+            # GRU layer:
+            self.gru = nn.GRU(data_size, gru_hidden_size, gru_layers, batch_first=True)
+
+            # put some fully connected layers after the gru
+            fc_in_size = gru_hidden_size
+
+            # instantiate a generativeFCNN:
+            self.fc_nn = createFCNN(fc_in_size, output_size, hidden_sizes, nonlinearity)()
+
+        def forward(self, x: TensorType["batch_size", "window_size", "data_size"]) \
+                -> TensorType["batch_size", 1, "output_size"]:
+            gru_out, _ = self.gru(x)
+
+            # this has shape [batch_size, window_size, gru_hidden_size]; take only the last temporal element:
+            gru_out = gru_out[:, -1, :].unsqueeze(1)
+
+            # now apply the FC generative net:
+            out = self.fc_nn(gru_out)
+            return out
+
+    return GRUNN
+
+
+def createGenerativeGRUNN(data_size, gru_hidden_size, noise_size, output_size, hidden_sizes=None, gru_layers=3,
+                          nonlinearity=None):
+    """Function returning a recurrent neural network with a given input and output size, and optionally
+    given hidden layer sizes (if these are not given, they are determined from the input and output size with some
+    expression). The NN here has two inputs,
+    which are the context x and the auxiliary variable z in the case of this being used for a generative model.
+
+    In order to instantiate the network, you need to write: createGenerativeGRUNN(input_size, output_size)() as the function
+    returns a class, and () is needed to instantiate an object.
+
+    Note that the nonlinearity here is as an object or a functional, not a class, eg:
+        nonlinearity =  nn.Softplus()
+    or:
+        nonlinearity =  nn.functional.softplus
+    """
+
+    class GenerativeGRUNN(nn.Module):
+        """Neural network class with sizes determined by the upper level variables."""
+
+        def __init__(self):
+            super(GenerativeGRUNN, self).__init__()
+
+            # GRU layer:
+            self.gru = nn.GRU(data_size, gru_hidden_size, gru_layers, batch_first=True)
+
+            # put some fully connected layers after the gru
+            fc_in_size = gru_hidden_size + noise_size
+
+            # instantiate a generativeFCNN:
+            self.fc_nn = createGenerativeFCNN(fc_in_size, output_size, hidden_sizes, nonlinearity)()
+
+        def forward(self, context: TensorType["batch_size", "window_size", "data_size"],
+                    z: TensorType["batch_size", "number_generations", "size_auxiliary_variable"]) \
+                -> TensorType["batch_size", "number_generations", "output_size"]:
+            gru_out, _ = self.gru(context)
+
+            # this has shape [batch_size, window_size, gru_hidden_size]; take only the last temporal element:
+            gru_out = gru_out[:, -1, :].unsqueeze(1)
+
+            # now apply the FC generative net:
+            out = self.fc_nn(gru_out, z)
+            return out
+
+    return GenerativeGRUNN
+
+
+def createCriticGRUNN(data_size, gru_hidden_size, hidden_sizes=None, gru_layers=3, nonlinearity=None, end_sigmoid=True):
+    """Function returning a fully connected neural network class with a given input and output size, and optionally
+    given hidden layer sizes (if these are not given, they are determined from the input and output size with some
+    expression). The NN here has two inputs,
+    which are the context x and the auxiliary variable z in the case of this being used for a Critic model.
+
+    In order to instantiate the network, you need to write: createCriticGRUNN(input_size, output_size)() as the function
+    returns a class, and () is needed to instantiate an object.
+
+    Note that the nonlinearity here is as an object or a functional, not a class, eg:
+        nonlinearity =  nn.Softplus()
+    or:
+        nonlinearity =  nn.functional.softplus
+
+    Output size is always 1 here. Additionally, a sigmoid is applied at the end so that the output is between 0 and 1.
+    """
+
+    class CriticGRUNN(nn.Module):
+        """Neural network class with sizes determined by the upper level variables."""
+
+        def __init__(self):
+            super(CriticGRUNN, self).__init__()
+
+            # GRU layer:
+            self.gru = nn.GRU(data_size, gru_hidden_size, gru_layers, batch_first=True)
+
+            # put some fully connected layers after the gru
+            self.fc_nn = createCriticFCNN(gru_hidden_size + data_size, hidden_sizes, nonlinearity, end_sigmoid)()
+
+        def forward(self, y: TensorType["batch_size", "data_size"],
+                    context: TensorType["batch_size", "window_size", "data_size"]) -> TensorType["batch_size", 1]:
+            gru_out, _ = self.gru(context)
+
+            # this has shape [batch_size, window_size, gru_hidden_size]; take only the last temporal element:
+            gru_out = gru_out[:, -1, :].unsqueeze(1)
+
+            # now apply the FC generative net:
+            out = self.fc_nn(y, gru_out)
+            return out
+
+    return CriticGRUNN
 
 
 class LayerNormMine(nn.Module):
@@ -372,7 +511,7 @@ class UNet2D(nn.Module):
         if self.noise_method == "dropout":
             out = torch.stack(
                 [self._forward_decoder(x_enc, z) for i in range(self.number_generations_per_forward_call)], dim=1)
-        else:  # with summed/concatenated noise
+        else:  # with summed/concatenated noise or with no noise
             out = self._forward_decoder(x_enc, z).reshape(x.shape[0], -1, x.shape[1], x.shape[2], x.shape[3])
         return out.permute(0, 1, 3, 4, 2)
 
@@ -380,12 +519,13 @@ class UNet2D(nn.Module):
         # x_dec = [self.center(x_enc[-1])]
         x_dec = self.center(x_enc[-1])
 
-        n_generations = z.shape[1]
         if self.noise_method == "sum":
+            n_generations = z.shape[1]
             # Adding noise in the bottleneck.
             # x_dec[0] = (x_dec[0].unsqueeze(1) + z).flatten(start_dim=0, end_dim=1)
             x_dec = (x_dec.unsqueeze(1) + z).flatten(start_dim=0, end_dim=1)
         elif self.noise_method == "concat":
+            n_generations = z.shape[1]
             # Concat on dim -3 since our tensors have shape (..., C, H, W)
             # NOTE: now z must have shape (B, E, C, H, W), where E is ensemble size (number of forward generations)
             x_dec_exp = x_dec.unsqueeze(1).expand(-1, n_generations, -1, -1, -1)
@@ -567,13 +707,10 @@ class ConditionalGenerativeModel(nn.Module):
 
 
 class DiscardWindowSizeDim(nn.Module):
-    """This is a class wrapping a net which takes as an input a conditioning variable and an auxiliary variable,
-    concatenates then and then feeds them through the NN. The auxiliary variable generation is done whenever the
-    forward method is called."""
 
     def __init__(self, net):
         super(DiscardWindowSizeDim, self).__init__()
-        self.net = net  # net has to be able to take input size `size_auxiliary_variable + dim(x)`
+        self.net = net
 
     def forward(self, context: Union[TensorType["batch_size", "window_size": 1, "data_size"], TensorType[
                                                                                               "batch_size",
@@ -585,6 +722,21 @@ class DiscardWindowSizeDim(nn.Module):
         context = context.squeeze(1)
 
         return self.net(context)
+
+
+class DiscardNumberGenerationsInOutput(nn.Module):
+    """This is a helper class that discards the number of generations in the output."""
+    def __init__(self, net):
+        super(DiscardNumberGenerationsInOutput, self).__init__()
+        self.net = net
+
+    def forward(self, context: Union[TensorType["batch_size", "window_size", "data_size"], TensorType[
+        "batch_size",
+        "window_size",
+        "height", "width",
+        "fields"]]) -> Union[
+        TensorType["batch_size", "data_size"], TensorType["batch_size", "height", "width", "fields"]]:
+        return self.net(context).squeeze(1)
 
 
 class InputTargetDataset(Dataset):

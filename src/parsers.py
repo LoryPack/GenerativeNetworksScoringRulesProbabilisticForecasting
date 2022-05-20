@@ -22,7 +22,7 @@ define_masks = {"lorenz": lorenz_mask,
 
 allowed_srs = ["Energy", "Kernel", "EnergyKernel", "Variogram", "EnergyVariogram", "KernelVariogram"]
 allowed_kernels = ["gaussian", "rational_quadratic"]
-allowed_methods = ['SR', 'GAN', 'WGAN_GP']
+allowed_methods = ['SR', 'GAN', 'WGAN_GP', 'regression']
 allowed_base_measures = ["normal", "laplace", "cauchy"]
 allowed_unet_noises = ["sum", "dropout", "concat"]
 nonlinearities_dict = {"relu": torch.nn.functional.relu, "tanhshrink": torch.nn.functional.tanhshrink,
@@ -96,6 +96,12 @@ def parser_train_net():
                         help="Do not perform training if the net exists "
                              "before.")
     parser.add_argument('--patch_size', type=int, default=None, help='Patch size for the masks')
+    parser.add_argument('--no_RNN', action="store_true", help="Use FCNN in place of RNN for the Lorenz63 and Lorenz96 "
+                                                              "models; ignored otherwise.")
+    parser.add_argument('--hidden_size_rnn', type=int, default=None, help='Hidden size for the RNN')
+    parser.add_argument('--weight_decay', type=float, default=0, help='Weight l2 penalization for the optimizer')
+    parser.add_argument('--scheduler_gamma', type=float, default=1, help='gamma parameter for scheduler; defaults to '
+                                                                         '1 which corresponds to no scheduler used')
 
     return parser
 
@@ -114,6 +120,9 @@ def parser_predict():
     parser.add_argument('--gamma_kernel_score_patched', type=float, default=None,
                         help='The value of bandwidth used in the kernel SR in the patched framework.'
                              'If not provided, it is determined from the observations in the validation window.')
+    parser.add_argument('--no_RNN', action="store_true", help="Use FCNN in place of RNN for the Lorenz63 and Lorenz96 "
+                                                              "models; ignored otherwise.")
+    parser.add_argument('--hidden_size_rnn', type=int, default=None, help='Hidden size for the RNN')
 
     return parser
 
@@ -172,7 +181,8 @@ def add_parser_arguments_predict_plot(parser):
 
 
 def obtain_name_folder(model, method, scoring_rule, kernel, patched, patch_size, ensemble_size, auxiliary_var_size,
-                       critic_steps_every_generator_step, base_measure, unet_large, method_is_gan):
+                       critic_steps_every_generator_step, base_measure, unet_large, method_is_gan, nn_model,
+                       hidden_size_rnn):
     if method_is_gan:
         nets_folder_name = method
         if critic_steps_every_generator_step != 1:
@@ -183,18 +193,25 @@ def obtain_name_folder(model, method, scoring_rule, kernel, patched, patch_size,
 
     if model != "WeatherBench":
         nets_folder_name += f"_auxdatasize_{auxiliary_var_size}"
-    if not method_is_gan and patched:
-        nets_folder_name += f"_patched_{patch_size}"
     if base_measure != "normal":
         nets_folder_name += "_" + base_measure
+
+    # this overrides the name
+    if method == "regression":
+        nets_folder_name = method
     if model == "WeatherBench" and unet_large:
         nets_folder_name += "_large_net"
+    if nn_model == "rnn":
+        nets_folder_name += f"_rnn_{hidden_size_rnn}"
+    if not method_is_gan and patched:
+        nets_folder_name += f"_patched_{patch_size}"
+
     return nets_folder_name
 
 
 def setup(model, root_folder, model_folder, datasets_folder, data_size, method, scoring_rule, kernel, patched,
           patch_size, ensemble_size, auxiliary_var_size, critic_steps_every_generator_step, base_measure, lr, lr_c,
-          batch_size, no_early_stop, noise_type, unet_large):
+          batch_size, no_early_stop, noise_type, unet_large, nn_model, hidden_size_rnn):
     if root_folder is None:
         root_folder = default_root_folder
 
@@ -207,6 +224,9 @@ def setup(model, root_folder, model_folder, datasets_folder, data_size, method, 
     if auxiliary_var_size is None:
         auxiliary_var_size = data_size
 
+    if hidden_size_rnn is None:
+        hidden_size_rnn = data_size
+
     if patch_size is None:
         patch_size = default_patch_size[model]
 
@@ -216,7 +236,7 @@ def setup(model, root_folder, model_folder, datasets_folder, data_size, method, 
 
     nets_folder_name = obtain_name_folder(model, method, scoring_rule, kernel, patched, patch_size, ensemble_size,
                                           auxiliary_var_size, critic_steps_every_generator_step, base_measure,
-                                          unet_large, method_is_gan)
+                                          unet_large, method_is_gan, nn_model, hidden_size_rnn)
 
     nets_folder = root_folder + '/' + model_folder + '/' + nets_folder_name + '/'
 
@@ -233,4 +253,4 @@ def setup(model, root_folder, model_folder, datasets_folder, data_size, method, 
 
     unet_depths = (32, 64, 128, 256) if unet_large else (32, 64, 128)
 
-    return datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan
+    return datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan, hidden_size_rnn

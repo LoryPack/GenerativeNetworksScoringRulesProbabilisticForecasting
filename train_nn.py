@@ -19,9 +19,10 @@ install_import_hook('src.unet_utils')
 
 from src.nn import InputTargetDataset, UNet2D, fit, fit_adversarial, \
     ConditionalGenerativeModel, createGenerativeFCNN, createCriticFCNN, test_epoch, PatchGANDiscriminator, \
-    DiscardWindowSizeDim, get_target, LayerNormMine
+    DiscardWindowSizeDim, get_target, LayerNormMine, createGenerativeGRUNN, createCriticGRUNN, \
+    DiscardNumberGenerationsInOutput, createGRUNN, createFCNN
 from src.scoring_rules import EnergyScore, KernelScore, VariogramScore, PatchedScoringRule, SumScoringRules, \
-    ScoringRulesForWeatherBench, ScoringRulesForWeatherBenchPatched
+    ScoringRulesForWeatherBench, ScoringRulesForWeatherBenchPatched, LossForWeatherBenchPatched
 from src.utils import plot_losses, save_net, save_dict_to_json, estimate_bandwidth_timeseries, lorenz96_variogram, \
     def_loader_kwargs, load_net, weight_for_summed_score, weatherbench_variogram_haversine
 from src.parsers import parser_train_net, define_masks, nonlinearities_dict, setup
@@ -67,16 +68,20 @@ lambda_gp = args.lambda_gp
 gamma = args.gamma_kernel_score
 notrain_if_done_before = args.notrain_if_done_before
 patch_size = args.patch_size
+no_RNN = args.no_RNN
+hidden_size_rnn = args.hidden_size_rnn
+weight_decay = args.weight_decay
+scheduler_gamma = args.scheduler_gamma
 args_dict = args.__dict__
-
-datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan = \
-    setup(model, root_folder, model_folder, datasets_folder, data_size, method, scoring_rule, kernel, patched,
-          patch_size, ensemble_size, auxiliary_var_size, critic_steps_every_generator_step, base_measure, lr, lr_c,
-          batch_size, args.no_early_stop, unet_noise_method, unet_large)
 
 model_is_weatherbench = model == "WeatherBench"
 
-nn_model = "unet" if model_is_weatherbench else "fcnn"
+nn_model = "unet" if model_is_weatherbench else ("fcnn" if no_RNN else "rnn")
+
+datasets_folder, nets_folder, data_size, auxiliary_var_size, name_postfix, unet_depths, patch_size, method_is_gan, hidden_size_rnn = \
+    setup(model, root_folder, model_folder, datasets_folder, data_size, method, scoring_rule, kernel, patched,
+          patch_size, ensemble_size, auxiliary_var_size, critic_steps_every_generator_step, base_measure, lr, lr_c,
+          batch_size, args.no_early_stop, unet_noise_method, unet_large, nn_model, hidden_size_rnn)
 
 # stop if the net exists already:
 if notrain_if_done_before and os.path.exists(nets_folder + f"net{name_postfix}.pth"):
@@ -127,7 +132,7 @@ else:
 
 # --- losses ---
 # instantiate the loss according to the chosen SR; each SR takes as input: (net_output, target)
-if not method_is_gan:
+if not method_is_gan and not method == "regression":
     if patched and not model_is_weatherbench:
         masks = define_masks[model](data_size=data_size, patch_size=patch_size)
     if scoring_rule in ["Kernel", "KernelVariogram", "EnergyKernel"]:
@@ -204,89 +209,140 @@ if not method_is_gan:
         loss_fn = patched_sr.estimate_score_batch
     else:
         loss_fn = sr_instance.estimate_score_batch
+elif method == "regression":
+    # use the RMSE loss function
+    loss_fn = nn.MSELoss()
+    # add a patched version for WeatherBench
+    if patched:
+        if model_is_weatherbench:
+            loss_fn = LossForWeatherBenchPatched(loss_fn)
+        else:
+            raise NotImplementedError
 
 # --- networks ---
 if seed is not None:  # set seed for network instantiating
     torch.manual_seed(seed)
-wrap_net = True
-number_generations_per_forward_call = ensemble_size if (method == "generative" or method == "Energy_SR_GAN") else 1
-# create generative net:
-if nn_model == "fcnn":
-    input_size = window_size * data_size + auxiliary_var_size
-    output_size = data_size
-    hidden_sizes_list = [int(input_size * 1.5), int(input_size * 3), int(input_size * 3),
-                         int(input_size * 0.75 + output_size * 3), int(output_size * 5)]
-    inner_net = createGenerativeFCNN(input_size=input_size, output_size=output_size, hidden_sizes=hidden_sizes_list,
-                                     nonlinearity=nonlinearities_dict[nonlinearity])()
-
-elif nn_model == "unet":
-    # select the noise method here:
-    inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
-                       number_generations_per_forward_call=number_generations_per_forward_call,
-                       conv_depths=unet_depths)
-    if unet_noise_method in ["sum", "concat"]:
-        # here we overwrite the auxiliary_var_size above, as there is a precise constraint
-        downsampling_factor, n_channels = inner_net.calculate_downsampling_factor()
-        if weatherbench_small:
-            auxiliary_var_size = torch.Size(
-                [n_channels, 16 // downsampling_factor, 16 // downsampling_factor])
-        else:
-            auxiliary_var_size = torch.Size(
-                [n_channels, data_size[1] // downsampling_factor, data_size[2] // downsampling_factor])
-    elif unet_noise_method == "dropout":
-        wrap_net = False  # do not wrap in the conditional generative model
-
-if wrap_net:
-    # the following wraps the nets above and takes care of generating the auxiliary variables at each forward call
-    if continue_training_net:
-        net = load_net(nets_folder + f"net{name_postfix}.pth", ConditionalGenerativeModel, inner_net,
-                       size_auxiliary_variable=auxiliary_var_size, base_measure=base_measure,
-                       number_generations_per_forward_call=number_generations_per_forward_call, seed=seed + 1)
+if method == "regression":
+    if nn_model == "unet":
+        # NOTE: make sure that a channels dimension exists
+        net_class = UNet2D
+        unet_kwargs = {"in_channels": data_size[0], "out_channels": 1,
+                       "noise_method": "no noise", "conv_depths": unet_depths}
+        net = DiscardWindowSizeDim(net_class(**unet_kwargs))
+    elif nn_model == "rnn":
+        output_size = data_size
+        gru_layers = 1
+        gru_hidden_size = hidden_size_rnn
+        net = createGRUNN(data_size=data_size, gru_hidden_size=gru_hidden_size,
+                          output_size=output_size, hidden_sizes=None, gru_layers=gru_layers,
+                          nonlinearity=nonlinearities_dict[nonlinearity])()
     else:
-        net = ConditionalGenerativeModel(inner_net, size_auxiliary_variable=auxiliary_var_size, seed=seed + 1,
-                                         number_generations_per_forward_call=number_generations_per_forward_call,
-                                         base_measure=base_measure)
-else:
-    if continue_training_net:
-        net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardWindowSizeDim, inner_net)
-    else:
-        net = DiscardWindowSizeDim(inner_net)
+        net = createFCNN(input_size=window_size * data_size, output_size=data_size, unsqueeze_output=True)()
 
-if method_is_gan:
+    if continue_training_net:
+        net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardNumberGenerationsInOutput, net)
+    else:
+        # create net
+        net = DiscardNumberGenerationsInOutput(net)
+else:  # generative-SR and GAN
+
+    wrap_net = True
+    number_generations_per_forward_call = ensemble_size if (method == "generative" or method == "Energy_SR_GAN") else 1
+    # create generative net:
     if nn_model == "fcnn":
-        if continue_training_net:
-            critic = load_net(nets_folder + f"critic{name_postfix}.pth",
-                              createCriticFCNN(input_size=(window_size + 1) * data_size,
-                                               end_sigmoid=method == "GAN"))
-        else:
-            critic = createCriticFCNN(input_size=(window_size + 1) * data_size, end_sigmoid=method == "GAN")()
+        input_size = window_size * data_size + auxiliary_var_size
+        output_size = data_size
+        hidden_sizes_list = [int(input_size * 1.5), int(input_size * 3), int(input_size * 3),
+                             int(input_size * 0.75 + output_size * 3), int(output_size * 5)]
+        inner_net = createGenerativeFCNN(input_size=input_size, output_size=output_size, hidden_sizes=hidden_sizes_list,
+                                         nonlinearity=nonlinearities_dict[nonlinearity])()
+    elif nn_model == "rnn":
+        output_size = data_size
+        gru_layers = 1
+        gru_hidden_size = hidden_size_rnn
+        inner_net = createGenerativeGRUNN(data_size=data_size, gru_hidden_size=gru_hidden_size,
+                                          noise_size=auxiliary_var_size,
+                                          output_size=output_size, hidden_sizes=None, gru_layers=gru_layers,
+                                          nonlinearity=nonlinearities_dict[nonlinearity])()
     elif nn_model == "unet":
-        # Using PatchGanDiscriminator model popularised in the following work:https://arxiv.org/abs/1611.07004v3
-        # This discriminator seems to be popular for image based GAN work
+        # select the noise method here:
+        inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
+                           number_generations_per_forward_call=number_generations_per_forward_call,
+                           conv_depths=unet_depths)
+        if unet_noise_method in ["sum", "concat"]:
+            # here we overwrite the auxiliary_var_size above, as there is a precise constraint
+            downsampling_factor, n_channels = inner_net.calculate_downsampling_factor()
+            if weatherbench_small:
+                auxiliary_var_size = torch.Size(
+                    [n_channels, 16 // downsampling_factor, 16 // downsampling_factor])
+            else:
+                auxiliary_var_size = torch.Size(
+                    [n_channels, data_size[1] // downsampling_factor, data_size[2] // downsampling_factor])
+        elif unet_noise_method == "dropout":
+            wrap_net = False  # do not wrap in the conditional generative model
+
+    if wrap_net:
+        # the following wraps the nets above and takes care of generating the auxiliary variables at each forward call
         if continue_training_net:
-            critic = load_net(nets_folder + f"critic{name_postfix}.pth",
-                              PatchGANDiscriminator, in_channels=1 + data_size[0], last_layer_filters=32,
-                              n_layers=3, end_sigmoid=method == "GAN",
-                              norm_layer=nn.BatchNorm2d if method != "WGAN_GP" else LayerNormMine)
+            net = load_net(nets_folder + f"net{name_postfix}.pth", ConditionalGenerativeModel, inner_net,
+                           size_auxiliary_variable=auxiliary_var_size, base_measure=base_measure,
+                           number_generations_per_forward_call=number_generations_per_forward_call, seed=seed + 1)
         else:
-            critic = PatchGANDiscriminator(in_channels=1 + data_size[0], first_layer_filters=32, n_layers=3,
-                                           end_sigmoid=method == "GAN",
-                                           norm_layer=nn.BatchNorm2d if method != "WGAN_GP" else LayerNormMine)
-            # in general, we have to put in_channels = (window_size * fields_context) + fields_target
+            net = ConditionalGenerativeModel(inner_net, size_auxiliary_variable=auxiliary_var_size, seed=seed + 1,
+                                             number_generations_per_forward_call=number_generations_per_forward_call,
+                                             base_measure=base_measure)
+    else:
+        if continue_training_net:
+            net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardWindowSizeDim, inner_net)
+        else:
+            net = DiscardWindowSizeDim(inner_net)
+
+    if method_is_gan:
+        if nn_model == "fcnn":
+            model_class = createCriticFCNN(input_size=(window_size + 1) * data_size,
+                                           end_sigmoid=method == "GAN")
+            if continue_training_net:
+                critic = load_net(nets_folder + f"critic{name_postfix}.pth", model_class)
+            else:
+                critic = model_class()
+        elif nn_model == "rnn":
+            gru_layers_critic = 1
+            gru_hidden_size = hidden_size_rnn
+            model_class = createCriticGRUNN(data_size, gru_hidden_size, gru_layers=gru_layers_critic,
+                                            end_sigmoid=method == "GAN")
+            if continue_training_net:
+                critic = load_net(nets_folder + f"critic{name_postfix}.pth", model_class)
+            else:
+                critic = model_class()
+        elif nn_model == "unet":
+            # Using PatchGanDiscriminator model popularised in the following work:https://arxiv.org/abs/1611.07004v3
+            # This discriminator seems to be popular for image based GAN work
+            if continue_training_net:
+                critic = load_net(nets_folder + f"critic{name_postfix}.pth",
+                                  PatchGANDiscriminator, in_channels=1 + data_size[0], last_layer_filters=32,
+                                  n_layers=3, end_sigmoid=method == "GAN",
+                                  norm_layer=nn.BatchNorm2d if method != "WGAN_GP" else LayerNormMine)
+            else:
+                critic = PatchGANDiscriminator(in_channels=1 + data_size[0], first_layer_filters=32, n_layers=3,
+                                               end_sigmoid=method == "GAN",
+                                               norm_layer=nn.BatchNorm2d if method != "WGAN_GP" else LayerNormMine)
+                # in general, we have to put in_channels = (window_size * fields_context) + fields_target
 
 # --- network tools ---
 if cuda:
     net.cuda()
 
-optimizer_kwargs = {}
+# optimizer
+optimizer_kwargs = {"weight_decay": weight_decay}  # l2 regularization
+args_dict["weight_decay"] = optimizer_kwargs["weight_decay"]
 optimizer = Adam(net.parameters(), lr=lr, **optimizer_kwargs)
-# else:
-#     optimizer = optimizer(embedding_net.parameters(), lr=lr, **optimizer_kwargs)
 
-# dummy scheduler:
-scheduler = lr_scheduler.StepLR(optimizer, 8, gamma=1, last_epoch=-1)
-# else:
-#     scheduler = scheduler(optimizer, **scheduler_kwargs)
+# scheduler
+scheduler_steps = 10
+scheduler_gamma = scheduler_gamma
+scheduler = lr_scheduler.StepLR(optimizer, scheduler_steps, gamma=scheduler_gamma, last_epoch=-1)
+args_dict["scheduler_steps"] = scheduler_steps
+args_dict["scheduler_gamma"] = scheduler_gamma
 
 if method_is_gan:
     if cuda:
