@@ -7,10 +7,6 @@ We provide here code to run forecast experiments on:
 - WeatherBench; we use the Z500 variable at the coarsest resolution (32x64). See [here](https://github.com/pangeo-data/WeatherBench) for Download instructions
 
 
-# Reproducibility: 
-
-In the `config` folder, we report `.json` files containing the arguments used to run the experiments reported in the paper.
-
 # Scripts
 We have 5 scripts: 
 
@@ -25,7 +21,7 @@ We have 5 scripts:
 ## Pip 
 
 The dependencies can be installed with ```pip install -r requirements.txt```. 
-However that is not enough to use the plotting features (cartopy). for that need to use Conda, see below.
+However that is not enough to use the plotting features for WeatherBench (using the library `cartopy`). for that need to use Conda, see below.
 
 ## Conda
 
