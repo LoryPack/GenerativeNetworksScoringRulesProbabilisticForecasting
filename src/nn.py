@@ -290,7 +290,7 @@ def createGRUNN(data_size, gru_hidden_size, output_size, hidden_sizes=None, gru_
             fc_in_size = gru_hidden_size
 
             # instantiate a generativeFCNN:
-            self.fc_nn = createFCNN(fc_in_size, output_size, hidden_sizes, nonlinearity)()
+            self.fc_nn = createFCNN(fc_in_size, output_size, hidden_sizes, nonlinearity, unsqueeze_output=True)()
 
         def forward(self, x: TensorType["batch_size", "window_size", "data_size"]) \
                 -> TensorType["batch_size", 1, "output_size"]:
@@ -930,8 +930,6 @@ def fit_adversarial(method, train_loader, generator, critic, optimizer_g, schedu
         batch_function = train_epoch_adversarial
     elif method == "WGAN_GP":
         batch_function = train_epoch_adversarial_wass_GP
-    elif method == "Energy_SR_GAN":
-        batch_function = train_epoch_adversarial_energy_SR
     else:
         raise NotImplementedError("The required GAN method is not implemented")
 

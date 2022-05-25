@@ -6,7 +6,7 @@ from src.utils import lorenz96_mask, return_raise_not_implemented, lorenz_mask
 
 default_root_folder = "results"
 
-default_model_folder = {"lorenz": "/toy_lorenz/",
+default_model_folder = {"lorenz": "/lorenz/",
                         "lorenz96": "/lorenz96/",
                         "WeatherBench": "/WeatherBench/"}
 
@@ -64,7 +64,7 @@ def parser_train_net():
     parser.add_argument('--weatherbench_small', action="store_true", help="Whether to use a 16x16 weathebench patch"
                                                                           " rather than the full one.")
     parser.add_argument('--unet_noise_method', type=str, default="sum", choices=allowed_unet_noises,
-                        help="Only relevant with WeatherBench and generative or GAN method.")
+                        help="Only relevant with WeatherBench and SR or GAN method.")
     parser.add_argument('--unet_large', action="store_true", help="Only relevant with WeatherBench.")
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--lr_c', type=float, default=1e-3,
@@ -154,7 +154,7 @@ def add_parser_arguments_predict_plot(parser):
     parser.add_argument('--weatherbench_small', action="store_true", help="Whether to use a 16x16 weathebench patch"
                                                                           " rather than the full one.")
     parser.add_argument('--unet_noise_method', type=str, default="sum", choices=allowed_unet_noises,
-                        help="Only relevant with WeatherBench and generative or GAN method.")
+                        help="Only relevant with WeatherBench and SR or GAN method.")
     parser.add_argument('--unet_large', action="store_true", help="Only relevant with WeatherBench.")
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--lr_c', type=float, default=1e-3,
@@ -230,7 +230,7 @@ def setup(model, root_folder, model_folder, datasets_folder, data_size, method, 
     if patch_size is None:
         patch_size = default_patch_size[model]
 
-    method_is_gan = method in ["GAN", "WGAN_GP", "Energy_SR_GAN"]
+    method_is_gan = method in ["GAN", "WGAN_GP"]
 
     datasets_folder = root_folder + '/' + model_folder + '/' + datasets_folder + '/'
 

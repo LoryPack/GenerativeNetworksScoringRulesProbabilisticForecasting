@@ -79,7 +79,7 @@ if method == "regression":
                    "noise_method": "no noise", "conv_depths": unet_depths}
     net = DiscardWindowSizeDim(net_class(**unet_kwargs))
     net = load_net(nets_folder + f"net{name_postfix}.pth", DiscardNumberGenerationsInOutput, net).net
-else:  # generative-SR and GAN
+else:  # SR and GAN
     # create generative net:
     inner_net = UNet2D(in_channels=data_size[0], out_channels=1, noise_method=unet_noise_method,
                        number_generations_per_forward_call=prediction_ensemble_size, conv_depths=unet_depths)

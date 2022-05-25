@@ -244,10 +244,10 @@ if method == "regression":
     else:
         # create net
         net = DiscardNumberGenerationsInOutput(net)
-else:  # generative-SR and GAN
+else:  # SR and GAN
 
     wrap_net = True
-    number_generations_per_forward_call = ensemble_size if (method == "generative" or method == "Energy_SR_GAN") else 1
+    number_generations_per_forward_call = ensemble_size if method == "SR" else 1
     # create generative net:
     if nn_model == "fcnn":
         input_size = window_size * data_size + auxiliary_var_size
@@ -353,9 +353,9 @@ if method_is_gan:
     scheduler_c = lr_scheduler.StepLR(optimizer_c, 8, gamma=1, last_epoch=-1)
 
 string = f"Train {method} network for {model} model with lr {lr} "
-if not method_is_gan:
+if method == "SR":
     string += f"using {scoring_rule} scoring rule"
-else:
+if method_is_gan:
     string += f"and critic lr {lr_c}"
 print(string)
 
