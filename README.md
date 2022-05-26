@@ -8,7 +8,7 @@ We provide here code to run forecast experiments on:
 
 
 # Scripts
-We have 5 scripts: 
+We have 5 Python scripts: 
 
 - `generate_data.py` needs to be run to generate datasets for Lorenz63 and Lorenz96
 - `train_nn.py` trains the generative networks with the different methods
@@ -16,6 +16,11 @@ We have 5 scripts:
 - `predict_test_plot_comparison.py` creates comparison plots between three selected methods, for Lorenz63 and Lorenz96
 - `plot_weatherbench.py` creates the plots for WeatherBench data
 
+Additionally, we provide 3 `bash` scripts which show how to run experiments on the three models. 
+
+- `run_lorenz63.sh` runs some experiments on the Lorenz63 model and allows to reproduce Figure 2a in the paper
+- `run_lorenz96.sh` runs some experiments on the Lorenz96 model and allows to reproduce Figure 2b in the paper
+- `run_WeatherBench.sh` runs some experiments on the WeatherBench model. To use this, the data needs to be downloaded as mentioned above. Also, these experiments require a GPU to run.
 
 # Dependencies
 ## Pip 
