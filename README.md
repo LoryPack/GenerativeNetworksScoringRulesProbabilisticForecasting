@@ -1,4 +1,4 @@
-# GenerativeNetworksScoringRulesProbabilisticForecasting
+# Probabilistic Forecasting with Generative Networks via Scoring Rule Minimization
  
 We provide here code to run forecast experiments on: 
 
