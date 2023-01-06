@@ -1,10 +1,14 @@
 # Probabilistic Forecasting with Generative Networks via Scoring Rule Minimization
- 
+
 We provide here code to run forecast experiments on: 
 
 - y coordinate of 3-dimensional Lorenz63 model.
+
 - 8-dimensional x variables for the Lorenz96 model integrated using the parametrized model.
+
 - WeatherBench; we use the Z500 variable at the coarsest resolution (32x64). See [here](https://github.com/pangeo-data/WeatherBench) for Download instructions
+
+  Additionally, the file `additional_results.pdf` contains additional figures for the Weatherbench dataset.
 
 
 # Scripts
@@ -38,7 +42,7 @@ conda install --file requirements_conda.txt
 but also need to install two other packages from pip: 
 
 ```pip install torchtyping typeguard einops```
- 
+
 If you want to use GPU, Pytorch has to be installed with the following, instead of the above  
 ```conda install pytorch cudatoolkit=10.2 -c pytorch```
 
