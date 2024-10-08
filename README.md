@@ -1,5 +1,9 @@
 # Probabilistic Forecasting with Generative Networks via Scoring Rule Minimization
 
+Code for the paper ["Probabilistic Forecasting with Generative Networks via Scoring Rule Minimization"](https://jmlr.org/papers/v25/23-0038.html).
+
+
+
 We provide here code to run forecast experiments on: 
 
 - y coordinate of 3-dimensional Lorenz63 model.
@@ -46,6 +50,22 @@ but also need to install two other packages from pip:
 If you want to use GPU, Pytorch has to be installed with the following, instead of the above  
 ```conda install pytorch cudatoolkit=10.2 -c pytorch```
 
+
+# Paper citation
+If you find this code useful, please cite the following paper:
+
+```bib
+@article{Pacchiardi2024Probabilistic,
+  author  = {Lorenzo Pacchiardi and Rilwan A. Adewoyin and Peter Dueben and Ritabrata Dutta},
+  title   = {Probabilistic Forecasting with Generative Networks via Scoring Rule Minimization},
+  journal = {Journal of Machine Learning Research},
+  year    = {2024},
+  volume  = {25},
+  number  = {45},
+  pages   = {1--64},
+  url     = {http://jmlr.org/papers/v25/23-0038.html}
+}
+```
 
 
 
